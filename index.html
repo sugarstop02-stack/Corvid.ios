@@ -4284,7 +4284,7 @@ function sessStart() {
   }).join('\n');
   document.getElementById('timerQueue').textContent = qText;
 
-  document.getElementById('topbarStatus').textContent = '● GM HUB // SESSION LIVE';
+  const _ts = document.getElementById('topbarStatus'); if(_ts) _ts.textContent = '● GM HUB // SESSION LIVE';
 
   sessCountdownInterval = setInterval(() => {
     const rem = sessEndTime - Date.now();
@@ -4308,7 +4308,7 @@ function sessStopped() {
   document.getElementById('timerQueue').textContent = '— awaiting start —';
   const btn = document.getElementById('timerBtn');
   btn.textContent = '▶ start session'; btn.className = 'sess-timer-btn';
-  document.getElementById('topbarStatus').textContent = '● GM HUB // ACTIVE';
+  const _ts = document.getElementById('topbarStatus'); if(_ts) _ts.textContent = '● GM HUB // ACTIVE';
   sessShowNotif('// session ended');
 }
 
@@ -4367,7 +4367,7 @@ function sessEnd() {
   document.getElementById('timerQueue').textContent = '— session complete —';
   const btn = document.getElementById('timerBtn');
   btn.textContent = '▶ start session'; btn.className = 'sess-timer-btn';
-  document.getElementById('topbarStatus').textContent = '● GM HUB // ACTIVE';
+  const _ts = document.getElementById('topbarStatus'); if(_ts) _ts.textContent = '● GM HUB // ACTIVE';
   sessShowNotif('// session complete');
 }
 
