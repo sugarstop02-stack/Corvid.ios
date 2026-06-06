@@ -2394,6 +2394,18 @@ function refreshDMs() {
 
 function deleteCharacter() {
   if(!confirm('The Archive will forget you. This cannot be undone.'))return;
+  const raw = localStorage.getItem('corvid_player');
+  if (raw) {
+    try {
+      const char = JSON.parse(raw);
+      if (char.handle && window._fb) {
+        const { db, ref, remove } = window._fb;
+        remove(ref(db, 'players/' + char.handle));
+        remove(ref(db, 'playerList/' + char.handle));
+        remove(ref(db, 'dms/' + char.handle));
+      }
+    } catch(e) {}
+  }
   localStorage.removeItem('corvid_player');
   showToast('Account deleted.');
   setTimeout(()=>showView('create'),800);
@@ -4649,7 +4661,10 @@ document.addEventListener('DOMContentLoaded', () => {
             <div style="font-family:Unbounded,sans-serif;font-size:0.65rem;font-weight:700;color:var(--neon-green)">${p.name}</div>
             <div style="font-family:Share Tech Mono,monospace;font-size:0.55rem;color:var(--text-dim)">@${p.handle} · ${p.faction||'unaffiliated'}</div>
           </div>
-          <button onclick="fbSendDM('${p.handle}')" style="margin-left:auto;background:transparent;border:1px solid var(--purple-mid);color:var(--purple-mid);font-family:Share Tech Mono,monospace;font-size:0.55rem;padding:4px 8px;cursor:pointer">✉ DM</button>
+          <div style="margin-left:auto;display:flex;gap:4px">
+            <button onclick="fbSendDM('${p.handle}')" style="background:transparent;border:1px solid var(--purple-mid);color:var(--purple-mid);font-family:Share Tech Mono,monospace;font-size:0.55rem;padding:4px 8px;cursor:pointer">✉ DM</button>
+            <button onclick="fbDeletePlayer('${p.handle}')" style="background:transparent;border:1px solid var(--neon-pink);color:var(--neon-pink);font-family:Share Tech Mono,monospace;font-size:0.55rem;padding:4px 8px;cursor:pointer">✕ del</button>
+          </div>
         </div>`
       ).join('');
     });
@@ -4668,6 +4683,43 @@ document.addEventListener('DOMContentLoaded', () => {
     all.push(dm);
     localStorage.setItem('corvid_dms', JSON.stringify(all));
     alert(`DM sent to @${handle}`);
+  };
+
+  // ── GM: DELETE PLAYER ──────────────────────────────────
+  // Track pending deletions awaiting second confirmation
+  window._pendingDelete = null;
+
+  window.fbDeletePlayer = function(handle) {
+    // Step 1: arm the delete
+    if (window._pendingDelete !== handle) {
+      window._pendingDelete = handle;
+      // Find the del button and put it in armed state
+      const btns = document.querySelectorAll('#gmPlayerList button');
+      btns.forEach(btn => {
+        if (btn.textContent.includes('del') && btn.getAttribute('onclick')?.includes(handle)) {
+          btn.textContent = '⚠ confirm?';
+          btn.style.background = 'var(--neon-pink)';
+          btn.style.color = 'var(--bg)';
+          btn.style.fontWeight = '700';
+        }
+      });
+      // Auto-cancel after 4 seconds if not confirmed
+      setTimeout(() => {
+        if (window._pendingDelete === handle) {
+          window._pendingDelete = null;
+          window.fbLoadPlayers(); // re-render to reset button
+        }
+      }, 4000);
+      return;
+    }
+
+    // Step 2: confirmed — execute delete
+    window._pendingDelete = null;
+    const { db, ref, remove } = window._fb;
+    remove(ref(db, 'players/' + handle));
+    remove(ref(db, 'playerList/' + handle));
+    remove(ref(db, 'dms/' + handle));
+    if (typeof sessShowNotif === 'function') sessShowNotif('// @' + handle + ' removed from Archive');
   };
 
   // ── PLAYER: LISTEN FOR DMs ───────────────────────────────
