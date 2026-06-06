@@ -4487,5 +4487,258 @@ document.addEventListener('DOMContentLoaded', () => {
 // PATCH: sessDeliverPost targets feed view
 // ══════════════════════════════════════════════════════
 </script>
+
+<!-- ══════════════════════════════════════════════════════
+     FIREBASE MULTIPLAYER
+     ══════════════════════════════════════════════════════ -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
+  import {
+    getDatabase, ref, set, get, push, onValue, onChildAdded, serverTimestamp, remove
+  } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDOGmv1gOIWG_XqKLTf6rmUxepIyeavH-Q",
+    authDomain: "dndgame-1658c.firebaseapp.com",
+    databaseURL: "https://dndgame-1658c-default-rtdb.firebaseio.com",
+    projectId: "dndgame-1658c",
+    storageBucket: "dndgame-1658c.firebasestorage.app",
+    messagingSenderId: "767561038180",
+    appId: "1:767561038180:web:99e203a302092703bee271",
+    measurementId: "G-KNE9VDLW8V"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // ── Expose to global scope so non-module scripts can call ──
+  window._fb = { db, ref, set, get, push, onValue, onChildAdded, serverTimestamp, remove };
+
+  // ── PLAYER SAVE ──────────────────────────────────────────
+  // Hook into submitCharacter: after localStorage write, mirror to Firebase
+  const _origSubmit = window.submitCharacter;
+  window.submitCharacter = function() {
+    _origSubmit && _origSubmit();
+    const raw = localStorage.getItem('corvid_player');
+    if (!raw) return;
+    const char = JSON.parse(raw);
+    if (!char.handle) return;
+    // Save full player profile
+    set(ref(db, `players/${char.handle}`), { ...char, lastSeen: Date.now() });
+    // Register in shared player list
+    set(ref(db, `playerList/${char.handle}`), {
+      name: char.name, handle: char.handle,
+      faction: char.faction, avatar: char.avatar,
+      joined: char.createdAt
+    });
+    console.log('[FB] Player saved:', char.handle);
+  };
+
+  // ── PLAYER LOAD on startup ───────────────────────────────
+  // If player is already local, also sync from Firebase (picks up GM DMs, etc.)
+  document.addEventListener('DOMContentLoaded', () => {
+    const raw = localStorage.getItem('corvid_player');
+    if (!raw) return;
+    try {
+      const char = JSON.parse(raw);
+      if (!char.handle) return;
+      // Keep local copy fresh from server
+      onValue(ref(db, `players/${char.handle}`), snap => {
+        if (snap.exists()) {
+          const serverChar = snap.val();
+          localStorage.setItem('corvid_player', JSON.stringify(serverChar));
+        }
+      });
+    } catch(e) {}
+  });
+
+  // ── FEED SYNC ────────────────────────────────────────────
+  // When GM delivers a post, push to Firebase
+  const _origDeliver = window.sessDeliverPost;
+  window.sessDeliverPost = function(idx) {
+    _origDeliver && _origDeliver(idx);
+    const html = typeof POST_POOL !== 'undefined' ? POST_POOL[idx] : null;
+    if (html) {
+      push(ref(db, 'feed'), { html, timestamp: Date.now(), idx });
+      console.log('[FB] Post pushed to feed:', idx);
+    }
+  };
+
+  // ── LISTEN FOR FEED POSTS (non-GM players) ───────────────
+  // Fires for each new post added after page load
+  let feedInitialized = false;
+  const seenFeedKeys = new Set();
+
+  function startFeedListener() {
+    onChildAdded(ref(db, 'feed'), snap => {
+      const key = snap.key;
+      if (seenFeedKeys.has(key)) return;
+      seenFeedKeys.add(key);
+      if (!feedInitialized) return; // skip history on first load
+      const data = snap.val();
+      if (!data?.html) return;
+      const fc = document.getElementById('feedContent');
+      if (!fc) return;
+      const wrap = document.createElement('div');
+      wrap.innerHTML = data.html;
+      const postEl = wrap.firstElementChild;
+      if (!postEl) return;
+      postEl.classList.add('incoming');
+      fc.insertBefore(postEl, fc.firstChild);
+      if (typeof sessWirePost === 'function') sessWirePost(postEl);
+      if (typeof sessShowNotif === 'function') sessShowNotif('// new post received');
+    });
+    // Mark existing keys as seen so we only react to new ones
+    get(ref(db, 'feed')).then(snap => {
+      if (snap.exists()) Object.keys(snap.val()).forEach(k => seenFeedKeys.add(k));
+      feedInitialized = true;
+    });
+  }
+
+  // Start listening when the feed view loads
+  const _origEnterFeed = window.enterFeed;
+  window.enterFeed = function() {
+    _origEnterFeed && _origEnterFeed();
+    startFeedListener();
+  };
+
+  // ── ROLLS SYNC ───────────────────────────────────────────
+  // Push every roll to Firebase so GM can see all players' rolls
+  const _origRoll = window.rollDice;
+  window.rollDice = function() {
+    _origRoll && _origRoll();
+    // Grab the roll record that was just saved to localStorage
+    const rolls = JSON.parse(localStorage.getItem('corvid_rolls') || '[]');
+    if (rolls.length) {
+      const latest = rolls[0];
+      push(ref(db, 'rolls'), latest);
+      console.log('[FB] Roll pushed:', latest);
+    }
+  };
+
+  // ── GM: LISTEN FOR ROLLS ─────────────────────────────────
+  // Load all rolls into GM drawer roll log
+  window.fbLoadRolls = function() {
+    const container = document.getElementById('gmRollLog');
+    if (!container) return;
+    onValue(ref(db, 'rolls'), snap => {
+      if (!snap.exists()) { container.innerHTML = '<div style="color:var(--text-faint);font-size:0.6rem;font-family:Share Tech Mono,monospace">// no rolls yet</div>'; return; }
+      const rolls = Object.values(snap.val()).sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
+      container.innerHTML = rolls.slice(0, 30).map(r =>
+        `<div style="border:1px solid var(--border);background:var(--bg3);padding:8px 10px;margin-bottom:6px;font-family:Share Tech Mono,monospace;font-size:0.58rem;">
+          <span style="color:var(--neon-green)">@${r.player}</span>
+          <span style="color:var(--text-dim)"> · ${r.stat} ${r.die} → </span>
+          <span style="color:var(--neon-orange);font-size:0.85rem;font-family:Unbounded,sans-serif;font-weight:900">${r.total}</span>
+          <span style="color:var(--purple-mid)"> ${r.label}</span>
+          ${r.context && r.context !== 'No context provided' ? `<div style="color:var(--text-dim);margin-top:4px;font-style:italic">"${r.context}"</div>` : ''}
+          <div style="color:var(--text-faint);margin-top:2px">${new Date(r.timestamp).toLocaleTimeString()}</div>
+        </div>`
+      ).join('');
+    });
+  };
+
+  // ── GM: LOAD PLAYER LIST ─────────────────────────────────
+  window.fbLoadPlayers = function() {
+    const container = document.getElementById('gmPlayerList');
+    if (!container) return;
+    onValue(ref(db, 'playerList'), snap => {
+      if (!snap.exists()) { container.innerHTML = '<div style="color:var(--text-faint);font-size:0.6rem;font-family:Share Tech Mono,monospace">// no players yet</div>'; return; }
+      const players = Object.values(snap.val());
+      container.innerHTML = players.map(p =>
+        `<div style="border:1px solid var(--border);background:var(--bg3);padding:8px 10px;margin-bottom:6px;display:flex;align-items:center;gap:10px;">
+          <span style="font-size:1.2rem">${p.avatar||'?'}</span>
+          <div>
+            <div style="font-family:Unbounded,sans-serif;font-size:0.65rem;font-weight:700;color:var(--neon-green)">${p.name}</div>
+            <div style="font-family:Share Tech Mono,monospace;font-size:0.55rem;color:var(--text-dim)">@${p.handle} · ${p.faction||'unaffiliated'}</div>
+          </div>
+          <button onclick="fbSendDM('${p.handle}')" style="margin-left:auto;background:transparent;border:1px solid var(--purple-mid);color:var(--purple-mid);font-family:Share Tech Mono,monospace;font-size:0.55rem;padding:4px 8px;cursor:pointer">✉ DM</button>
+        </div>`
+      ).join('');
+    });
+  };
+
+  // ── GM: SEND DM via Firebase ─────────────────────────────
+  window.fbSendDM = function(handle) {
+    const body = prompt(`DM to @${handle}:`);
+    if (!body) return;
+    const from = prompt('From (sender name):') || 'CORVAIUS';
+    const dm = { to: handle, from, body, timestamp: new Date().toISOString(), unread: true };
+    // Push to Firebase
+    push(ref(db, `dms/${handle}`), dm);
+    // Also keep local for GM view
+    const all = JSON.parse(localStorage.getItem('corvid_dms') || '[]');
+    all.push(dm);
+    localStorage.setItem('corvid_dms', JSON.stringify(all));
+    alert(`DM sent to @${handle}`);
+  };
+
+  // ── PLAYER: LISTEN FOR DMs ───────────────────────────────
+  // When a player is in the feed, watch for incoming DMs
+  window.startDMListener = function(handle) {
+    onChildAdded(ref(db, `dms/${handle}`), snap => {
+      const dm = snap.val();
+      if (!dm) return;
+      // Merge into localStorage so loadDMs() picks it up
+      const all = JSON.parse(localStorage.getItem('corvid_dms') || '[]');
+      const exists = all.some(d => d.timestamp === dm.timestamp && d.from === dm.from);
+      if (!exists) {
+        all.push(dm);
+        localStorage.setItem('corvid_dms', JSON.stringify(all));
+        // Flash badge if on sheet view
+        const badge = document.getElementById('dm-count-badge');
+        if (badge) { badge.style.display = 'inline'; badge.textContent = `[NEW]`; badge.style.color = 'var(--neon-pink)'; }
+        if (typeof sessShowNotif === 'function') sessShowNotif(`// DM from ${dm.from}`);
+      }
+    });
+  };
+
+  // Kick off DM listener when entering feed
+  const _origEnterFeed2 = window.enterFeed;
+  window.enterFeed = function() {
+    _origEnterFeed2 && _origEnterFeed2();
+    const raw = localStorage.getItem('corvid_player');
+    if (raw) {
+      try { const char = JSON.parse(raw); if (char.handle) window.startDMListener(char.handle); } catch(e) {}
+    }
+  };
+
+  // ── GM DRAWER: inject Firebase tabs ─────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+    // Watch for GM drawer opening and inject player list + rolls
+    const drawer = document.getElementById('gm-drawer');
+    if (!drawer) return;
+    const observer = new MutationObserver(() => {
+      if (drawer.classList.contains('open')) {
+        // Add Firebase tabs if not already present
+        if (!document.getElementById('fb-gm-tabs')) {
+          const tabWrap = document.createElement('div');
+          tabWrap.id = 'fb-gm-tabs';
+          tabWrap.innerHTML = `
+            <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:16px">
+              <div style="font-family:Share Tech Mono,monospace;font-size:0.58rem;text-transform:uppercase;letter-spacing:0.15em;color:var(--neon-orange);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border)">
+                ◈ firebase // live data
+              </div>
+              <div style="display:flex;gap:6px;margin-bottom:10px">
+                <button onclick="fbLoadPlayers()" style="flex:1;background:transparent;border:1px solid var(--border);color:var(--text-dim);font-family:Share Tech Mono,monospace;font-size:0.6rem;padding:6px;cursor:pointer;text-transform:uppercase">⬡ players</button>
+                <button onclick="fbLoadRolls()" style="flex:1;background:transparent;border:1px solid var(--border);color:var(--text-dim);font-family:Share Tech Mono,monospace;font-size:0.6rem;padding:6px;cursor:pointer;text-transform:uppercase">⚄ rolls</button>
+              </div>
+              <div id="gmPlayerList" style="max-height:200px;overflow-y:auto"></div>
+              <div id="gmRollLog" style="max-height:200px;overflow-y:auto;margin-top:8px"></div>
+            </div>
+          `;
+          drawer.querySelector('.gm-drawer-inner, .gm-drawer-content, .gm-content') 
+            ? drawer.querySelector('.gm-drawer-inner, .gm-drawer-content, .gm-content').appendChild(tabWrap)
+            : drawer.appendChild(tabWrap);
+        }
+        // Auto-load on open
+        window.fbLoadPlayers();
+        window.fbLoadRolls();
+      }
+    });
+    observer.observe(drawer, { attributes: true, attributeFilter: ['class'] });
+  });
+
+  console.log('[Corvid.OS] Firebase multiplayer initialized ✓');
+</script>
 </body>
 </html>
